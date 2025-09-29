@@ -145,7 +145,7 @@ class AudioProcessor:
                 
             return State(
                 tokens=self.tokens.copy(),
-                translated_segments=self.translated_segments.copy(),
+                translated_segments=self.translated_segments.copy() if self.translated_segments is not None else [],
                 buffer_transcription=self.buffer_transcription,
                 end_buffer=self.end_buffer,
                 end_attributed_speaker=self.end_attributed_speaker,
@@ -374,7 +374,8 @@ class AudioProcessor:
                         tokens_to_process.append(additional_token)                
                 if tokens_to_process:
                     self.translation.insert_tokens(tokens_to_process)
-                    self.translated_segments = await asyncio.to_thread(self.translation.process)
+                    result = await asyncio.to_thread(self.translation.process)
+                    self.translated_segments = result if result is not None else []
                 self.translation_queue.task_done()
                 for _ in additional_tokens:
                     self.translation_queue.task_done()

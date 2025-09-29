@@ -126,8 +126,41 @@ def parse_args():
         type=str,
         default="",
         dest="target_language",
-        help="Target language for translation. Not functional yet.",
+        help="Target language for translation.",
     )    
+
+    parser.add_argument(
+        "--translation-backend",
+        type=str,
+        default="nllb",
+        choices=["nllb", "llm"],
+        dest="translation_backend",
+        help="Translation backend to use. 'nllb' for NLLB model, 'llm' for LLM-based translation.",
+    )
+
+    parser.add_argument(
+        "--llm-api-url",
+        type=str,
+        default="http://localhost:1717",
+        dest="llm_api_url",
+        help="URL for LLM API server (when using --translation-backend llm).",
+    )
+
+    parser.add_argument(
+        "--llm-model-name",
+        type=str,
+        default="openai/gpt-oss-120b",
+        dest="llm_model_name",
+        help="LLM model name to use for translation (when using --translation-backend llm).",
+    )
+
+    parser.add_argument(
+        "--llm-context-size",
+        type=int,
+        default=5,
+        dest="llm_context_size",
+        help="Number of previous message pairs to include as context for LLM translation.",
+    )
 
     parser.add_argument(
         "--backend",

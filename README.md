@@ -266,3 +266,31 @@ docker run --gpus all -p 8000:8000 --name wlk wlk --model large-v3 --language fr
 
 ## 🔮 Use Cases
 Capture discussions in real-time for meeting transcription, help hearing-impaired users follow conversations through accessibility tools, transcribe podcasts or videos automatically for content creation, transcribe support calls with speaker identification for customer service...
+
+## Gladia-like Real-Time API
+
+A new server `whisperlivekit/gladia_api_server.py` mimics Gladia's live API:
+
+- `POST /v2/live` to create a session and get a WebSocket URL
+- `WS /v2/live?token=...` to stream audio and receive messages
+  - `audio_chunk` acknowledgments
+  - `transcript` messages for partials (`is_final: false`) and final segments (`is_final: true`)
+  - `translation` messages after final transcripts when translation is enabled
+  - a final `session_summary` with all utterances on close
+
+Run the server:
+
+```bash
+# With NLLB translation (default)
+whisperlivekit-gladia --host 0.0.0.0 --port 8000 --backend simulstreaming --lan fr --target-language en --pcm-input
+
+# With LLM translation (requires VLLM server at localhost:1717)
+whisperlivekit-gladia --host 0.0.0.0 --port 8000 --backend simulstreaming --lan fr --target-language en --pcm-input --translation-backend llm --llm-api-url http://localhost:1717 --llm-model-name openai/gpt-oss-120b
+```
+
+Point the provided Streamlit client to this server by setting the API base:
+
+```bash
+export GLADIA_API_URL="http://localhost:8000"
+streamlit run transcriptlive/gladia_streamlit_simple.py
+```

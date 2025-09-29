@@ -135,13 +135,26 @@ class TranscriptionEngine:
             if self.args.lan == 'auto' and self.args.backend != "simulstreaming":
                 raise Exception('Translation cannot be set with language auto when transcription backend is not simulstreaming')
             else:
-                from whisperlivekit.translation.translation import load_model
-                translation_params = { 
-                    "nllb_backend": "ctranslate2",
-                    "nllb_size": "600M"
-                }
-                translation_params = update_with_kwargs(translation_params, kwargs)
-                self.translation_model = load_model([self.args.lan], **translation_params) #in the future we want to handle different languages for different speakers
+                # Check if LLM translation is requested
+                translation_backend = kwargs.get('translation_backend', 'nllb')
+                
+                if translation_backend == 'llm':
+                    from whisperlivekit.translation.translation import load_llm_model
+                    llm_params = {
+                        "api_url": kwargs.get('llm_api_url', "http://localhost:1717"),
+                        "model_name": kwargs.get('llm_model_name', "openai/gpt-oss-120b"),
+                        "context_size": kwargs.get('llm_context_size', 5)
+                    }
+                    self.translation_model = load_llm_model(**llm_params)
+                else:
+                    # Default NLLB translation
+                    from whisperlivekit.translation.translation import load_model
+                    translation_params = { 
+                        "nllb_backend": "ctranslate2",
+                        "nllb_size": "600M"
+                    }
+                    translation_params = update_with_kwargs(translation_params, kwargs)
+                    self.translation_model = load_model([self.args.lan], **translation_params) #in the future we want to handle different languages for different speakers
         TranscriptionEngine._initialized = True
 
 
@@ -169,5 +182,11 @@ def online_translation_factory(args, translation_model):
     #should be at speaker level in the future:
     #one shared nllb model for all speaker
     #one tokenizer per speaker/language
-    from whisperlivekit.translation.translation import OnlineTranslation
-    return OnlineTranslation(translation_model, [args.lan], [args.target_language])
+    
+    # Check the backend type and use appropriate translation class
+    if hasattr(translation_model, 'backend_type') and translation_model.backend_type == 'llm':
+        from whisperlivekit.translation.translation import LLMOnlineTranslation
+        return LLMOnlineTranslation(translation_model, [args.lan], [args.target_language])
+    else:
+        from whisperlivekit.translation.translation import OnlineTranslation
+        return OnlineTranslation(translation_model, [args.lan], [args.target_language])

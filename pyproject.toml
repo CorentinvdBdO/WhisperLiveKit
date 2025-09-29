@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whisperlivekit"
-version = "0.2.11.post1"
+version = "0.2.12"
 description = "Real-time speech-to-text with speaker diarization using Whisper"
 readme = "README.md"
 authors = [
@@ -48,6 +48,7 @@ Homepage = "https://github.com/QuentinFuxa/WhisperLiveKit"
 
 [project.scripts]
 whisperlivekit-server = "whisperlivekit.basic_server:main"
+whisperlivekit-gladia = "whisperlivekit.gladia_api_server:main"
 
 [tool.setuptools]
 packages = ["whisperlivekit", "whisperlivekit.diarization", "whisperlivekit.simul_whisper", "whisperlivekit.simul_whisper.whisper", "whisperlivekit.simul_whisper.whisper.assets", "whisperlivekit.simul_whisper.whisper.normalizers", "whisperlivekit.web", "whisperlivekit.whisper_streaming_custom", "whisperlivekit.translation"]
