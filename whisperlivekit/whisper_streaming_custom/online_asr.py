@@ -32,8 +32,23 @@ class HypothesisBuffer:
         """
         # Apply the offset to each token.
         new_tokens = [token.with_offset(offset) for token in new_tokens]
-        # Only keep tokens that are roughly “new”
-        self.new = [token for token in new_tokens if token.start > self.last_committed_time - 0.1]
+        
+        # ANTI-STUCK: Filter out excessive repetition (hallucination detection)
+        # If same token appears 3+ times in a row, it's likely a hallucination
+        filtered_tokens = []
+        for token in new_tokens:
+            # Check if this token repeats the last 2 tokens
+            if len(filtered_tokens) >= 2:
+                last_two = [t.text.strip() for t in filtered_tokens[-2:]]
+                current = token.text.strip()
+                # If all 3 are identical (any length - catches "Merci", "...", etc.)
+                if last_two[0] == last_two[1] == current:
+                    logger.warning(f"Detected repetitive hallucination: '{current}' repeated 3x, skipping")
+                    continue  # Skip this repetitive token
+            filtered_tokens.append(token)
+        
+        # Only keep tokens that are roughly "new"
+        self.new = [token for token in filtered_tokens if token.start > self.last_committed_time - 0.1]
 
         if self.new:
             first_token = self.new[0]

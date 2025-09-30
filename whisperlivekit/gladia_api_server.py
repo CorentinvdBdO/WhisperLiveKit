@@ -70,7 +70,12 @@ async def initiate_live(request: Request, region: Optional[str] = None):
         "region": region or "local",
     }
 
-    url = f"ws://{args.host}:{args.port}/v2/live?token={token}"
+    # Use the request host instead of args.host (which may be 0.0.0.0)
+    # Client needs a real host to connect to, not 0.0.0.0
+    client_host = request.client.host if request.client else "localhost"
+    # If server is bound to 0.0.0.0, use localhost for client
+    ws_host = "localhost" if args.host == "0.0.0.0" else args.host
+    url = f"ws://{ws_host}:{args.port}/v2/live?token={token}"
 
     response = {
         "id": token,
@@ -88,6 +93,7 @@ class GladiaSessionState:
         self.byte_counter = 0
         self.time_ms_counter = 0.0
         self.prev_partial_text: Optional[str] = None
+        self.prev_partial_translation: Optional[str] = None
         self.line_id_map: Dict[int, str] = {}
         self.lines_by_index: Dict[int, Any] = {}
         self.finalized_line_indexes: set[int] = set()
@@ -226,6 +232,21 @@ async def gladia_results_dispatcher(websocket: WebSocket, state: GladiaSessionSt
         async for front in results_generator:
             # 'front' is a FrontData object with .lines (List[Line]) and .buffer_transcription
             lines = [ln for ln in (front.lines or []) if (ln and ln.text)]
+            
+            # Always send lag metrics even if no lines
+            lag_metrics = {
+                "type": "lag_metrics",
+                "session_id": state.session_id,
+                "created_at": _now_iso(),
+                "data": {
+                    "remaining_time_transcription": front.remaining_time_transcription,
+                    "remaining_time_translation": getattr(front, 'remaining_time_translation', 0.0),
+                    "remaining_time_diarization": front.remaining_time_diarization,
+                },
+                "error": None,
+            }
+            await websocket.send_json(lag_metrics)
+            
             if not lines:
                 continue
 
@@ -276,6 +297,17 @@ async def gladia_results_dispatcher(websocket: WebSocket, state: GladiaSessionSt
                         if tmsg:
                             await websocket.send_json(tmsg)
                             state.translation_sent_line_indexes.add(i)
+                
+                # Also emit translation for the last (partial) line if available
+                # This allows real-time subtitle display without waiting for finalization
+                if last_idx >= 0 and lines[last_idx]:
+                    partial_translation = (getattr(lines[last_idx], "translation", "") or "").strip()
+                    # Only send if translation changed (avoid duplicates)
+                    if partial_translation and partial_translation != state.prev_partial_translation:
+                        tmsg = make_translation_message(state.session_id, last_idx, lines[last_idx], target_language)
+                        if tmsg:
+                            await websocket.send_json(tmsg)
+                            state.prev_partial_translation = partial_translation
 
             await asyncio.sleep(0.01)
 
@@ -330,29 +362,54 @@ def build_session_summary(state: GladiaSessionState) -> Dict[str, Any]:
 async def live_websocket(websocket: WebSocket, token: str):
     global transcription_engine
 
+    logger.info(f"WebSocket connection attempt. token={token}, active_sessions={len(_sessions)}")
+
     if token not in _sessions:
+        logger.warning(f"Token {token} not found in sessions. Rejecting connection.")
         await websocket.close(code=4401)
         return
 
     await websocket.accept()
-    logger.info(f"Gladia-like WebSocket connected. token={token}")
+    logger.info(f"Gladia-like WebSocket connected. token={token}, active_sessions={len(_sessions)}")
 
     # Force PCM input mode for this API (client sends raw PCM base64)
     try:
         setattr(transcription_engine.args, "pcm_input", True)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Error setting pcm_input: {e}")
 
     # Create per-connection audio processor using the shared engine
+    try:
+        logger.debug("Creating AudioProcessor...")
     audio_processor = AudioProcessor(
         transcription_engine=transcription_engine,
     )
+        logger.debug("AudioProcessor created successfully")
+    except Exception as e:
+        logger.error(f"Error creating AudioProcessor: {e}", exc_info=True)
+        await websocket.close(code=1011, reason="Failed to create audio processor")
+        return
 
     # Start processing tasks and transform their output into Gladia messages
+    try:
+        logger.debug("Creating processing tasks...")
     results_generator = await audio_processor.create_tasks()
+        logger.debug("Processing tasks created successfully")
+    except Exception as e:
+        logger.error(f"Error creating tasks: {e}", exc_info=True)
+        await websocket.close(code=1011, reason="Failed to create tasks")
+        return
+
     session_state = GladiaSessionState(session_id=token, engine_args=transcription_engine.args)
 
+    try:
+        logger.debug("Starting dispatcher task...")
     dispatcher_task = asyncio.create_task(gladia_results_dispatcher(websocket, session_state, results_generator, transcription_engine.args, audio_processor))
+        logger.debug("Dispatcher task started successfully")
+    except Exception as e:
+        logger.error(f"Error starting dispatcher: {e}", exc_info=True)
+        await websocket.close(code=1011, reason="Failed to start dispatcher")
+        return
 
     try:
         while True:
@@ -362,6 +419,25 @@ async def live_websocket(websocket: WebSocket, token: str):
             except WebSocketDisconnect:
                 logger.info("WebSocket disconnected by client during receive loop.")
                 break
+            except RuntimeError as e:
+                if "disconnect" in str(e).lower():
+                    logger.info("WebSocket already disconnected.")
+                    break
+                raise
+
+            # Log the received message for debugging
+            msg_type = msg.get("type")
+            logger.debug(f"Received message type: {msg_type}, keys: {list(msg.keys())}")
+            
+            # Check for disconnect message
+            if msg_type == "websocket.disconnect":
+                logger.info("Received disconnect message from client")
+                break
+            
+            # Ignore connection/handshake messages
+            if msg_type in ("websocket.connect", "websocket.accept"):
+                logger.debug(f"Ignoring handshake message: {msg_type}")
+                continue
 
             if "bytes" in msg and msg["bytes"] is not None:
                 audio_bytes = msg["bytes"]
@@ -400,7 +476,8 @@ async def live_websocket(websocket: WebSocket, token: str):
                     # Unknown message types can be ignored or logged
                     logger.debug(f"Ignoring message type: {mtype}")
             else:
-                # No actionable data
+                # No actionable data - log for debugging
+                logger.debug(f"Received message with no actionable data: {msg}")
                 continue
 
     except Exception as e:
@@ -422,6 +499,11 @@ async def live_websocket(websocket: WebSocket, token: str):
                     logger.warning(f"Exception while awaiting dispatcher_task completion: {e}")
 
         await audio_processor.cleanup()
+
+        # Clean up session from registry
+        if token in _sessions:
+            del _sessions[token]
+            logger.info(f"Removed session {token} from registry. Active sessions: {len(_sessions)}")
 
         # Send final session summary
         try:

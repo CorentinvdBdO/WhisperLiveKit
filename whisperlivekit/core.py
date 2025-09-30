@@ -48,7 +48,7 @@ class TranscriptionEngine:
         transcription_common_params = {
             "backend": "simulstreaming",
             "warmup_file": None,
-            "min_chunk_size": 0.5,
+            "min_chunk_size": 0.3,  # Reduced from 0.5 for more responsive transcription
             "model_size": "tiny",
             "model_cache_dir": None,
             "model_dir": None,

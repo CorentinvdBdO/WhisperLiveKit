@@ -10,6 +10,8 @@ from whisperlivekit.timed_objects import Translation
 import requests
 import json
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,20 @@ class LLMOnlineTranslation:
         self.len_processed_buffer = 0
         self.translation_remaining = Translation()
         self.validated = []
+        
+        # Thread pool for parallel LLM calls
+        self.executor = ThreadPoolExecutor(
+            max_workers=4,  # Allow 4 concurrent LLM requests
+            thread_name_prefix="llm_translation"
+        )
+        self.pending_futures = {}  # Track in-flight translation requests
+        self.futures_lock = Lock()
+        
+        # ANTI-STUCK: Track last translated text to avoid re-translating same input
+        self.last_translated_text = None
+        self.last_translation_result = None
+        
+        logger.info("LLM translation initialized with ThreadPoolExecutor (4 workers for parallel requests)")
         
         # Test API connectivity
         self._test_api_connectivity()
@@ -203,6 +219,11 @@ Rules:
         """Translate text using LLM"""
         if not input_text.strip():
             return ""
+        
+        # ANTI-STUCK: If same text as before, return cached translation
+        if input_text == self.last_translated_text and self.last_translation_result:
+            logger.debug(f"Reusing cached translation for: '{input_text[:40]}...'")
+            return self.last_translation_result
             
         logger.debug(f"Translating: '{input_text}' from {input_lang} to {output_lang}")
         
@@ -210,6 +231,10 @@ Rules:
         translation = self._call_llm_api(messages)
         
         logger.debug(f"Translation result: '{translation}'")
+        
+        # Cache this translation
+        self.last_translated_text = input_text
+        self.last_translation_result = translation
         
         # Only add successful translations to context history (not error messages)
         if not translation.startswith("[Translation error:"):
@@ -261,13 +286,17 @@ Rules:
         self.buffer.extend(tokens)
 
     def process(self):
-        """Process buffered tokens and return translated segments"""
-        if len(self.buffer) < self.len_processed_buffer + 3: # nothing new to process
+        """Process buffered tokens with parallel LLM calls"""
+        # Check and collect any completed translations first
+        self._collect_completed_translations()
+        
+        if len(self.buffer) < self.len_processed_buffer + 1: # Start translating with just 1 new token (was +3)
             return self.validated + [self.translation_remaining] if self.translation_remaining else self.validated
             
         i = 0
         while i < len(self.buffer):
             if self.buffer[i].is_punctuation():
+                # Final sentences are translated synchronously for consistency
                 translation_sentence = self.translate_tokens(self.buffer[:i+1])
                 if translation_sentence:
                     self.validated.append(translation_sentence)
@@ -276,23 +305,95 @@ Rules:
             else:
                 i += 1
                 
-        # Translate remaining tokens
-        self.translation_remaining = self.translate_tokens(self.buffer)
+        # Translate remaining tokens IN PARALLEL using thread pool
+        if self.buffer:
+            buffer_snapshot = self.buffer.copy()
+            buffer_text = ' '.join([t.text for t in buffer_snapshot])
+            
+            with self.futures_lock:
+                # Only submit if not already translating this text
+                if buffer_text not in self.pending_futures:
+                    # Submit to thread pool (non-blocking!)
+                    future = self.executor.submit(
+                        self.translate_tokens,
+                        buffer_snapshot
+                    )
+                    self.pending_futures[buffer_text] = {
+                        'future': future,
+                        'submitted_at': time.time(),
+                        'text': buffer_text[:50]  # For logging
+                    }
+                    logger.debug(f"Submitted parallel translation: '{buffer_text[:40]}...'")
+        
+        # Collect any newly completed translations
+        self._collect_completed_translations()
+        
         self.len_processed_buffer = len(self.buffer)
         
         result = self.validated.copy()
         if self.translation_remaining:
             result.append(self.translation_remaining)
         return result
+    
+    def _collect_completed_translations(self):
+        """Check for and collect completed translation futures (non-blocking)"""
+        with self.futures_lock:
+            completed_keys = []
+            
+            for key, data in list(self.pending_futures.items()):
+                future = data['future']
+                
+                # Non-blocking check
+                if future.done():
+                    try:
+                        translation = future.result(timeout=0)
+                        if translation:
+                            self.translation_remaining = translation
+                            elapsed = time.time() - data['submitted_at']
+                            logger.debug(f"Parallel translation completed in {elapsed:.2f}s: '{data['text']}...'")
+                        completed_keys.append(key)
+                    except Exception as e:
+                        logger.error(f"Translation error for '{data['text']}...': {e}")
+                        completed_keys.append(key)
+                else:
+                    # Check for timeouts (>5 seconds)
+                    age = time.time() - data['submitted_at']
+                    if age > 5.0:
+                        logger.warning(f"Translation timeout ({age:.1f}s) for '{data['text']}...', cancelling")
+                        future.cancel()
+                        completed_keys.append(key)
+            
+            # Clean up completed/timed-out futures
+            for key in completed_keys:
+                self.pending_futures.pop(key, None)
 
     def insert_silence(self, silence_duration: float):
         """Handle silence - clear context if too long"""
         if silence_duration > MIN_SILENCE_DURATION_DEL_BUFFER:
             self.context_history.clear()
             self.buffer = []
+            # ANTI-STUCK: Clear translation cache on silence (new context)
+            self.last_translated_text = None
+            self.last_translation_result = None
             if self.translation_remaining:
                 self.validated.append(self.translation_remaining)
                 self.translation_remaining = Translation()
+    
+    def cleanup(self):
+        """Cleanup thread pool on shutdown"""
+        logger.info("Shutting down LLM translation thread pool...")
+        with self.futures_lock:
+            # Cancel all pending futures
+            for key, data in self.pending_futures.items():
+                future = data['future']
+                if not future.done():
+                    future.cancel()
+                    logger.debug(f"Cancelled pending translation: '{data['text']}...'")
+            self.pending_futures.clear()
+        
+        # Shutdown executor
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        logger.info("LLM translation thread pool shutdown complete")
 
 
 class OnlineTranslation:

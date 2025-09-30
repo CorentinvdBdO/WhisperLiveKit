@@ -69,6 +69,7 @@ class AudioProcessor:
         self.speaker_languages = {}
         self.cumulative_pcm_len = 0
         self.diarization_before_transcription = False
+        self.end_translated = 0  # Track the end time of last translation
 
         # Models and processing
         self.asr = models.asr
@@ -142,6 +143,14 @@ class AudioProcessor:
             if self.tokens:
                 latest_end = max(self.end_buffer, self.tokens[-1].end if self.tokens else 0)
                 remaining_diarization = max(0, round(latest_end - self.end_attributed_speaker, 1))
+            
+            # Calculate translation lag: difference between transcription and translation
+            remaining_translation = 0
+            if self.tokens and self.args.target_language:
+                # Latest transcription time
+                latest_transcription_end = max(token.end for token in self.tokens if not getattr(token, 'is_dummy', False)) if self.tokens else 0
+                # Translation lag is how far behind translation is from transcription
+                remaining_translation = max(0, round(latest_transcription_end - self.end_translated, 1))
                 
             return State(
                 tokens=self.tokens.copy(),
@@ -150,7 +159,8 @@ class AudioProcessor:
                 end_buffer=self.end_buffer,
                 end_attributed_speaker=self.end_attributed_speaker,
                 remaining_time_transcription=remaining_transcription,
-                remaining_time_diarization=remaining_diarization
+                remaining_time_diarization=remaining_diarization,
+                remaining_time_translation=remaining_translation
             )
             
     async def reset(self):
@@ -375,7 +385,11 @@ class AudioProcessor:
                 if tokens_to_process:
                     self.translation.insert_tokens(tokens_to_process)
                     result = await asyncio.to_thread(self.translation.process)
-                    self.translated_segments = result if result is not None else []
+                    async with self.lock:
+                        self.translated_segments = result if result is not None else []
+                        # Update end_translated to track translation progress
+                        if self.translated_segments:
+                            self.end_translated = max(seg.end for seg in self.translated_segments if seg and hasattr(seg, 'end'))
                 self.translation_queue.task_done()
                 for _ in additional_tokens:
                     self.translation_queue.task_done()
@@ -455,7 +469,8 @@ class AudioProcessor:
                     buffer_transcription=buffer_transcription.text.strip(),
                     buffer_diarization=buffer_diarization.strip(),
                     remaining_time_transcription=state.remaining_time_transcription,
-                    remaining_time_diarization=state.remaining_time_diarization if self.args.diarization else 0
+                    remaining_time_diarization=state.remaining_time_diarization if self.args.diarization else 0,
+                    remaining_time_translation=state.remaining_time_translation
                 )
                                 
                 should_push = (response != self.last_response_content)

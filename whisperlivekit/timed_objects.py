@@ -147,6 +147,7 @@ class FrontData():
     buffer_diarization: str = ''
     remaining_time_transcription: float = 0.
     remaining_time_diarization: float = 0.
+    remaining_time_translation: float = 0.
     
     def to_dict(self):
         _dict = {
@@ -156,6 +157,7 @@ class FrontData():
             'buffer_diarization': self.buffer_diarization,
             'remaining_time_transcription': self.remaining_time_transcription,
             'remaining_time_diarization': self.remaining_time_diarization,
+            'remaining_time_translation': self.remaining_time_translation,
         }
         if self.error:
             _dict['error'] = self.error
@@ -175,3 +177,4 @@ class State():
     end_attributed_speaker: float
     remaining_time_transcription: float
     remaining_time_diarization: float
+    remaining_time_translation: float = 0.0
